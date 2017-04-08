@@ -20,12 +20,16 @@ object StackOverflow extends StackOverflow {
   /** Main function */
   def main(args: Array[String]): Unit = {
 
-    val lines   = sc.textFile("src/main/resources/stackoverflow/stackoverflow.csv")
+    val lines   = sc.textFile("src/main/resources/stackoverflow/stackoverflow.csv")//.sample(false, 0.1)
     val raw     = rawPostings(lines)
+   // print("rawPostings count: " + raw.count())
     val grouped = groupedPostings(raw)
+   // print("groupedPostings count: " + grouped.count())
     val scored  = scoredPostings(grouped)
-    val vectors = vectorPostings(scored)
-//    assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
+   // print("scoredPostings count: " + scored.count())
+
+    val vectors = vectorPostings(scored).persist()
+    assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
 
     val means   = kmeans(sampleVectors(vectors), vectors, debug = true)
     val results = clusterResults(means, vectors)
@@ -77,10 +81,11 @@ class StackOverflow extends Serializable {
 
 
   /** Group the questions and answers together */
-  def groupedPostings(postings: RDD[Posting]): RDD[(Int, Iterable[(Posting, Posting)])] = {
-    ???
+  def   groupedPostings(postings: RDD[Posting]): RDD[(Int, Iterable[(Posting, Posting)])] = {
+    val questions: RDD[(Int, Posting)] = postings.filter(_.postingType == 1).map((p: Posting) => (p.id, p))
+    val answers: RDD[(Int, Posting)] = postings.filter(_.postingType == 2).map((p: Posting) => (p.parentId.get, p))
+    questions.join(answers).groupByKey()
   }
-
 
   /** Compute the maximum score for each posting */
   def scoredPostings(grouped: RDD[(Int, Iterable[(Posting, Posting)])]): RDD[(Posting, Int)] = {
@@ -96,8 +101,11 @@ class StackOverflow extends Serializable {
           }
       highScore
     }
+    // what if highest score is negative???
 
-    ???
+    // (id, [(q1,a1), (q1,a2)...]) => (q1, answerHighScore(q1 answers))
+    grouped.map{ case(id, qas) => (qas.head._1, answerHighScore(qas.map( q_a => q_a._2).toArray))}
+
   }
 
 
@@ -116,8 +124,11 @@ class StackOverflow extends Serializable {
         }
       }
     }
-
-    ???
+  // tags definition unclear here. do we just get first tag and ignore rest?
+    // is zero a valid...
+    scored.filter(x => !x._1.tags.isEmpty )map{
+      case (question,score) => (firstLangInTag( question.tags, langs).get * langSpread, score )
+    }
   }
 
 
@@ -170,11 +181,27 @@ class StackOverflow extends Serializable {
   //
   //
 
+  //val newSums = vectors.map( p => (findClosest(p, init), (p, 1))).reduceByKey{ case ( ((p1,q1),c1), ((p2,q2),c2) ) => ((p1+q1, p2+q2), c1+c2) }.collect
+
+  def updateMeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)]) : Array[(Int, Int)] ={
+    var newMeans = means.clone()
+    val newSums = vectors.map( p => (findClosest(p, means), ((p._1.toLong,p._2.toLong), 1L))).
+      reduceByKey{ case ( ((p1,q1),c1), ((p2,q2),c2) ) => (((p1+q1, p2+q2)), c1+c2) }.collect
+    val changedMeans: Array[(Int,(Int, Int))] = newSums.sortBy( (p:(Int,((Long, Long),Long) )) => p._1).map(p=>
+      ( p._1,((p._2._1._1/p._2._2).toInt,
+              (p._2._1._2/p._2._2).toInt)))
+    for ( chgMean <- changedMeans){
+      newMeans(chgMean._1) = chgMean._2
+      //check index 0 or 1
+    }
+    newMeans
+  }
+
+
   /** Main kmeans computation */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
-    val newMeans = means.clone() // you need to compute newMeans
+    val newMeans = updateMeans(means, vectors)
 
-    // TODO: Fill in the newMeans array
     val distance = euclideanDistance(means, newMeans)
 
     if (debug) {
@@ -273,12 +300,22 @@ class StackOverflow extends Serializable {
     val closestGrouped = closest.groupByKey()
 
     val median = closestGrouped.mapValues { vs =>
-      val langLabel: String   = ??? // most common language in the cluster
-      val langPercent: Double = ??? // percent of the questions in the most common language
-      val clusterSize: Int    = ???
-      val medianScore: Int    = ???
+
+      val counts = vs.map( (x:(Int,Int)) => (x._1, 1)).groupBy(_._1).map{ case (x,y) => (x,y.map(_._2).sum)}.toList.sortBy((x: (Int,Int)) => -x._2)
+        //groupBy(_._1).reduceB{case (p, q) => p. + q}.sortBy( (x:(Int,Int)) => - x._2).collect
+      val langLabel: String = langs(counts.head._1 / langSpread)
+      // most common language in the cluster
+      val clusterSize: Int = counts.map(_._2).sum
+      val langPercent: Double = counts.head._2 /clusterSize.toDouble
+      // percent of the questions in the most common language
+      val tmp  = vs.map(_._2).toArray.sorted
+      val medianScore: Int = tmp(clusterSize/2)
+
+      //map( (x:(Int,Int)) => (x._2,1)).groupBy(_._1).map(x => (x._1, x._2.sum))
+
 
       (langLabel, langPercent, clusterSize, medianScore)
+
     }
 
     median.collect().map(_._2).sortBy(_._4)

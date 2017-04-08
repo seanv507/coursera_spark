@@ -11,7 +11,7 @@ resolvers += Resolver.sonatypeRepo("releases")
 // grading libraries
 libraryDependencies += "junit" % "junit" % "4.10" % "test"
 libraryDependencies ++= assignmentsMap.value.values.flatMap(_.dependencies).toSeq
-
+libraryDependencies += "org.scalatest" %% "scalatest" % "2.2.6" % "test"
 // include the common dir
 commonSourcePackages += "common"
 
